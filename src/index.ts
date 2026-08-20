@@ -129,7 +129,7 @@ async function retryFailedDownloads(): Promise<void> {
     return;
   }
 
-  const pending = failed.filter((entry) => entry.downloadButtonName && entry.uuid);
+  const pending = failed.filter((entry) => entry.downloadButtonName && (entry.uuid || entry.rutaDoc));
   if (pending.length === 0) {
     console.log('No hay descargas fallidas pendientes.');
     return;
@@ -143,6 +143,7 @@ async function retryFailedDownloads(): Promise<void> {
   for (const entry of pending) {
     const document: DocumentRecord = {
       index: -1,
+      kind: entry.uuid ? 'resolucion' : 'analisis',
       title: entry.title,
       number: entry.number,
       uuid: entry.uuid,
@@ -306,6 +307,9 @@ async function downloadDocument(
   if (document.uuid) {
     payload.set('uuid', document.uuid);
   }
+  if (document.rutaDoc) {
+    payload.set('ruta_doc', document.rutaDoc);
+  }
 
   const response = await requestWithRetry(START_URL, {
     method: 'POST',
@@ -324,10 +328,14 @@ async function downloadDocument(
   });
 
   if (response.status >= 400) {
-    throw new Error(`HTTP ${response.status}`);
+    const errorBody = Buffer.from(response.data).subarray(0, 300).toString('latin1');
+    throw new Error(`HTTP ${response.status} ${errorBody}`);
   }
 
-  const filename = getFilenameFromHeaders(response.headers) ?? `${sanitizeFileName(document.title)}.pdf`;
+  const filename =
+    document.kind === 'analisis'
+      ? `${sanitizeFileName(document.title)}_documento-completo.pdf`
+      : getFilenameFromHeaders(response.headers) ?? `${sanitizeFileName(document.title)}.pdf`;
   const body = Buffer.from(response.data);
   if (body.length < 5 || body.toString('latin1', 0, 5) !== '%PDF-') {
     throw new Error('La respuesta no es un PDF (sesión/ViewState expirado o error del servidor)');

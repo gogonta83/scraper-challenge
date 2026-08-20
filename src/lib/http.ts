@@ -56,7 +56,7 @@ export async function requestWithRetry(
         validateStatus: () => true,
       });
 
-      if (response.status !== 429) {
+      if (response.status !== 429 && response.status < 500) {
         mergeSetCookies(response.headers, options.cookieJar);
         return {
           status: response.status,
@@ -127,7 +127,7 @@ export async function ensureDirPath(path: string): Promise<void> {
 
 export function sanitizeFileName(name: string): string {
   return name
-    .normalize('NFKD')
+    .normalize('NFC')
     .replace(/[\\/:*?"<>|\u0000-\u001f]/g, '_')
     .replace(/\s+/g, ' ')
     .trim()

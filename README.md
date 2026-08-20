@@ -2,7 +2,8 @@
 
 Scraper en TypeScript (sin automatización de navegador) para extraer los datos de los
 documentos del portal de jurisprudencia, navegar por todas las páginas y descargar los
-PDFs asociados. Usa únicamente `axios` (requests HTTP) y `cheerio` (parsing).
+PDFs asociados: el documento completo de cada análisis y las resoluciones individuales.
+Usa únicamente `axios` (requests HTTP) y `cheerio` (parsing).
 
 ## Requisitos
 
@@ -51,7 +52,8 @@ npm run dev
 
 ## Salida
 
-- `scraped/pdfs/`: PDFs descargados.
+- `scraped/pdfs/`: PDFs descargados — `*_documento-completo.pdf` para el análisis
+  completo de cada tarjeta y `Resolucion_*.pdf` para cada resolución individual.
 - `scraped/documents.json`: datos estructurados de todos los documentos encontrados
   (título, número de recurso, sala, fecha, resumen, especialidad, uuid, parámetros de
   detalle y nombre del PDF descargado).
@@ -61,9 +63,9 @@ npm run dev
 ## Manejo de 429
 
 El scraper reintenta automáticamente los requests que devuelven `429 Too Many Requests`
-con backoff exponencial y respeta `Retry-After` cuando el servidor lo envía. Si el error
-persiste tras varios intentos, registra el documento en `failed.json` y continúa con el
-siguiente.
+o errores transitorios `5xx` con backoff exponencial y respeta `Retry-After` cuando el
+servidor lo envía. Si el error persiste tras varios intentos, registra el documento en
+`failed.json` y continúa con el siguiente.
 
 ## Notas
 

@@ -2,6 +2,7 @@ import * as cheerio from 'cheerio';
 
 export type DocumentRecord = {
   index: number;
+  kind?: 'analisis' | 'resolucion';
   title: string;
   number?: string;
   room?: string;
@@ -108,19 +109,8 @@ export function parseDocumentsFromHtml(html: string): DocumentRecord[] {
   const docs: DocumentRecord[] = [];
   const seen = new Set<string>();
 
-  $('table[id$="gridParticipante"] tbody tr').each((index, tr) => {
-    const row = $(tr);
-    const cells = row.find('td');
-    const downloadInput = row.find('input[type="image"][onclick*="mojarra.jsfcljs"]').first();
-    const downloadSubmit = row.find('input[type="submit"][onclick*="mojarra.jsfcljs"]').first();
-    const detailLink = row.find('a[onclick*="RichFaces.ajax"]').first();
-    if (downloadInput.length === 0 && downloadSubmit.length === 0 && detailLink.length === 0) {
-      return;
-    }
-
-    const downloadParams = parseDownloadParams(downloadInput.attr('onclick') ?? '');
-    const detailParams = parseDetailParams(detailLink.attr('onclick') ?? '');
-    const panel = row.closest('.rf-p');
+  $('div.rf-p[id^="formBoletin:repeat:"]').each((_panelIndex, panelEl) => {
+    const panel = $(panelEl);
     const titleBlock = panel.find('span[style*="text-decoration: underline"]').first();
     const especialidad = clean(
       panel
@@ -132,22 +122,60 @@ export function parseDocumentsFromHtml(html: string): DocumentRecord[] {
         .first()
         .text()
     );
-    const uniqueKey = downloadParams.ruta_doc || detailParams.uuid || clean(cells.eq(0).text()) || `document-${index + 1}`;
-    if (seen.has(uniqueKey)) return;
-    seen.add(uniqueKey);
+    const summary = clean(panel.find('p').first().text());
 
-    docs.push({
-      index,
-      title: clean(titleBlock.text()) ?? clean(cells.eq(0).text()) ?? `document-${index + 1}`,
-      number: clean(cells.eq(0).clone().find('input').remove().end().text()),
-      room: clean(cells.eq(1).text()),
-      date: clean(cells.eq(2).text()),
-      summary: clean(panel.find('p').first().text()),
-      especialidad,
-      uuid: detailParams.uuid || downloadParams.uuid,
-      rutaDoc: downloadParams.ruta_doc,
-      downloadButtonName: downloadInput.attr('name') ?? downloadSubmit.attr('name') ?? undefined,
-      detailParams,
+    // Documento completo: botón "Descargar" del panel (parámetro ruta_doc)
+    const descargarButton = panel.find('input[type="submit"][onclick*="mojarra.jsfcljs"]').first();
+    const panelParams = parseDownloadParams(descargarButton.attr('onclick') ?? '');
+    if (descargarButton.length > 0 && panelParams.ruta_doc) {
+      const uniqueKey = `analisis:${panelParams.ruta_doc}`;
+      if (!seen.has(uniqueKey)) {
+        seen.add(uniqueKey);
+        docs.push({
+          index: docs.length,
+          kind: 'analisis',
+          title: clean(titleBlock.text()) ?? `document-${docs.length + 1}`,
+          summary,
+          especialidad,
+          rutaDoc: panelParams.ruta_doc,
+          downloadButtonName: descargarButton.attr('name'),
+          detailParams: {},
+        });
+      }
+    }
+
+    // Resoluciones individuales: ícono PDF de cada fila (parámetro uuid)
+    panel.find('table[id$="gridParticipante"] tbody tr').each((_rowIndex, tr) => {
+      const row = $(tr);
+      const cells = row.find('td');
+      const downloadInput = row.find('input[type="image"][onclick*="mojarra.jsfcljs"]').first();
+      const downloadSubmit = row.find('input[type="submit"][onclick*="mojarra.jsfcljs"]').first();
+      const detailLink = row.find('a[onclick*="RichFaces.ajax"]').first();
+      if (downloadInput.length === 0 && downloadSubmit.length === 0 && detailLink.length === 0) {
+        return;
+      }
+
+      const downloadParams = parseDownloadParams(downloadInput.attr('onclick') ?? '');
+      const detailParams = parseDetailParams(detailLink.attr('onclick') ?? '');
+      const uniqueKey =
+        downloadParams.ruta_doc || detailParams.uuid || clean(cells.eq(0).text()) || `document-${docs.length + 1}`;
+      if (seen.has(uniqueKey)) return;
+      seen.add(uniqueKey);
+
+      docs.push({
+        index: docs.length,
+        kind: 'resolucion',
+        title: clean(titleBlock.text()) ?? clean(cells.eq(0).text()) ?? `document-${docs.length + 1}`,
+        number: clean(cells.eq(0).clone().find('input').remove().end().text()),
+        room: clean(cells.eq(1).text()),
+        date: clean(cells.eq(2).text()),
+        summary,
+        especialidad,
+        uuid: detailParams.uuid || downloadParams.uuid,
+        rutaDoc: downloadParams.ruta_doc,
+        downloadButtonName: downloadInput.attr('name') ?? downloadSubmit.attr('name') ?? undefined,
+        detailParams,
+      });
     });
   });
 
@@ -173,6 +201,7 @@ export function parseDocumentsFromHtml(html: string): DocumentRecord[] {
 
       docs.push({
         index,
+        kind: 'resolucion',
         title: clean(titleBlock.text()) ?? clean(cells.eq(0).text()) ?? `document-${index + 1}`,
         number: clean(cells.eq(0).clone().find('input').remove().end().text()),
         room: clean(cells.eq(1).text()),
