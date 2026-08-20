@@ -2,6 +2,7 @@ import * as cheerio from 'cheerio';
 
 export type RegistroDocumento = {
   index: number;
+  grupo?: number;
   kind?: 'analisis' | 'resolucion';
   title: string;
   number?: string;
@@ -108,12 +109,14 @@ export function extraerEstadoVista(html: string): string {
 
 // Extrae los documentos de una página: el análisis completo (ruta_doc) de cada
 // tarjeta y las resoluciones individuales (uuid) de cada fila de su tabla.
-export function parsearDocumentos(html: string): RegistroDocumento[] {
+export function parsearDocumentos(html: string, grupoInicial = 0): RegistroDocumento[] {
   const $ = cheerio.load(extraerCdata(html));
   const documentos: RegistroDocumento[] = [];
   const vistos = new Set<string>();
+  let numeroGrupo = grupoInicial;
 
   $('div.rf-p[id^="formBoletin:repeat:"]').each((_indicePanel, panelEl) => {
+    numeroGrupo += 1;
     const panel = $(panelEl);
     const bloqueTitulo = panel.find('span[style*="text-decoration: underline"]').first();
     const especialidad = limpiar(
@@ -137,6 +140,7 @@ export function parsearDocumentos(html: string): RegistroDocumento[] {
         vistos.add(claveUnica);
         documentos.push({
           index: documentos.length,
+          grupo: numeroGrupo,
           kind: 'analisis',
           title: limpiar(bloqueTitulo.text()) ?? `document-${documentos.length + 1}`,
           summary: resumen,
@@ -171,6 +175,7 @@ export function parsearDocumentos(html: string): RegistroDocumento[] {
 
       documentos.push({
         index: documentos.length,
+        grupo: numeroGrupo,
         kind: 'resolucion',
         title: limpiar(bloqueTitulo.text()) ?? limpiar(celdas.eq(0).text()) ?? `document-${documentos.length + 1}`,
         number: limpiar(celdas.eq(0).clone().find('input').remove().end().text()),
@@ -191,6 +196,7 @@ export function parsearDocumentos(html: string): RegistroDocumento[] {
     const crudo = extraerCdata(html);
     const coincidencias = Array.from(crudo.matchAll(/<tr[^>]*id="[^"]*gridParticipante:[^"]*"[\s\S]*?<\/tr>/gi));
     for (const [indice, coincidencia] of coincidencias.entries()) {
+      numeroGrupo += 1;
       const htmlFila = coincidencia[0];
       const $fila = cheerio.load(htmlFila);
       const celdas = $fila('td');
@@ -213,6 +219,7 @@ export function parsearDocumentos(html: string): RegistroDocumento[] {
 
       documentos.push({
         index: indice,
+        grupo: numeroGrupo,
         kind: 'resolucion',
         title: limpiar(bloqueTitulo.text()) ?? limpiar(celdas.eq(0).text()) ?? `document-${indice + 1}`,
         number: limpiar(celdas.eq(0).clone().find('input').remove().end().text()),

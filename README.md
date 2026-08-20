@@ -27,8 +27,8 @@ npm run dev
 - `START_URL`: URL inicial del listado. Por defecto usa el portal del desafío.
 - `OUTPUT_DIR`: carpeta de salida. Por defecto `scraped`.
 - `MAX_PAGES`: límite opcional de páginas a recorrer.
-- `MAX_DOWNLOAD_ATTEMPTS`: límite total de documentos a intentar descargar. Por defecto `1`;
-  usa `0` para descargar todos.
+- `MAX_DOWNLOAD_ATTEMPTS`: límite total de documentos a intentar descargar. Por defecto
+  `0` (sin límite: descarga todo).
 - `REQUEST_DELAY_MS`: pausa entre requests en milisegundos. Por defecto `4000`.
 - `SESSION_ATTEMPTS`: reintentos al establecer la sesión JSF si el servidor devuelve
   `ViewExpiredException`. Por defecto `5`.
@@ -38,8 +38,16 @@ npm run dev
 Ejemplo:
 
 ```powershell
-$env:MAX_DOWNLOAD_ATTEMPTS="0"
+npm run dev
+```
+
+Sin variables de entorno el scraper descarga todos los documentos de todas las páginas
+(con pausa de 4 segundos entre peticiones). Para limitar, por ejemplo a 5 páginas y
+10 descargas:
+
+```powershell
 $env:MAX_PAGES="5"
+$env:MAX_DOWNLOAD_ATTEMPTS="10"
 npm run dev
 ```
 
@@ -52,8 +60,10 @@ npm run dev
 
 ## Salida
 
-- `scraped/pdfs/`: PDFs descargados — `*_documento-completo.pdf` para el análisis
-  completo de cada tarjeta y `Resolucion_*.pdf` para cada resolución individual.
+- `scraped/pdfs/`: PDFs descargados, organizados en una carpeta numerada por tarjeta
+  del listado. Dentro de cada carpeta (`1/`, `2/`, `3/`, …) quedan el análisis completo
+  (`*_documento-completo.pdf`) y las resoluciones individuales (`Resolucion_*.pdf`)
+  de esa tarjeta.
 - `scraped/documents.json`: datos estructurados únicamente de los documentos
   descargados (título, número de recurso, sala, fecha, resumen, especialidad, uuid,
   parámetros de detalle y nombre del PDF). Si una descarga falla, el documento aparece

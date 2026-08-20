@@ -19,7 +19,7 @@ const START_URL =
 const OUTPUT_DIR = process.env.OUTPUT_DIR ?? 'scraped';
 const MAX_PAGES = Number(process.env.MAX_PAGES ?? '0');
 const REQUEST_DELAY_MS = Number(process.env.REQUEST_DELAY_MS ?? '4000');
-const MAX_DOWNLOAD_ATTEMPTS = Number(process.env.MAX_DOWNLOAD_ATTEMPTS ?? '1');
+const MAX_DOWNLOAD_ATTEMPTS = Number(process.env.MAX_DOWNLOAD_ATTEMPTS ?? '0');
 const SESSION_ATTEMPTS = Number(process.env.SESSION_ATTEMPTS ?? '5');
 
 type ContenedorCookies = { valor: string };
@@ -36,6 +36,7 @@ type RegistroExtraido = RegistroDocumento & {
 
 type RegistroFallido = {
   title: string;
+  grupo?: number;
   number?: string;
   uuid?: string;
   rutaDoc?: string;
@@ -57,13 +58,14 @@ async function main(): Promise<void> {
   let intentosDescarga = 0;
   let descargasExitosas = 0;
   let totalEncontrados = 0;
+  let totalGrupos = 0;
   const documentos: RegistroExtraido[] = [];
   const descargasFallidas: RegistroFallido[] = [];
   let sesion = await establecerSesion();
   let numeroPagina = 1;
 
   while (true) {
-    const documentosPagina = parsearDocumentos(sesion.html);
+    const documentosPagina = parsearDocumentos(sesion.html, totalGrupos);
     console.log(`Página ${numeroPagina}: ${documentosPagina.length} documentos`);
     totalEncontrados += documentosPagina.length;
 
@@ -108,6 +110,7 @@ async function main(): Promise<void> {
     }
 
     await guardarSalidas(documentos, descargasFallidas);
+    totalGrupos = documentosPagina.reduce((maximo, documento) => Math.max(maximo, documento.grupo ?? 0), totalGrupos);
 
     if (MAX_PAGES > 0 && numeroPagina >= MAX_PAGES) break;
 
@@ -160,6 +163,7 @@ async function reintentarDescargasFallidas(): Promise<void> {
   for (const registro of pendientes) {
     const documento: RegistroDocumento = {
       index: -1,
+      grupo: registro.grupo,
       kind: registro.uuid ? 'resolucion' : 'analisis',
       title: registro.title,
       number: registro.number,
@@ -358,6 +362,9 @@ async function descargarDocumento(
     throw new Error(`HTTP ${respuesta.codigo} ${cuerpoError}`);
   }
 
+  const carpeta = String(documento.grupo ?? 'sin-grupo');
+  await asegurarDirectorio(`${OUTPUT_DIR}/pdfs/${carpeta}`);
+
   const nombreArchivo =
     documento.kind === 'analisis'
       ? `${sanitizarNombreArchivo(documento.title)}_documento-completo.pdf`
@@ -366,14 +373,16 @@ async function descargarDocumento(
   if (cuerpo.length < 5 || cuerpo.toString('latin1', 0, 5) !== '%PDF-') {
     throw new Error('La respuesta no es un PDF (sesión/ViewState expirado o error del servidor)');
   }
-  await writeFile(`${OUTPUT_DIR}/pdfs/${nombreArchivo}`, cuerpo);
-  return nombreArchivo;
+  const rutaArchivo = `${carpeta}/${nombreArchivo}`;
+  await writeFile(`${OUTPUT_DIR}/pdfs/${rutaArchivo}`, cuerpo);
+  return rutaArchivo;
 }
 
 // 10. Convierte un documento fallido en su registro para failed.json.
 function crearRegistroFallido(documento: RegistroDocumento, error: string): RegistroFallido {
   return {
     title: documento.title,
+    grupo: documento.grupo,
     number: documento.number,
     uuid: documento.uuid,
     rutaDoc: documento.rutaDoc,
