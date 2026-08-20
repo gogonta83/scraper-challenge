@@ -24,6 +24,9 @@ npm run dev
 
 ## Variables de entorno
 
+Los nombres de las variables de entorno se mantienen en inglés para no romper los
+comandos existentes; en el código, las constantes correspondientes están en español.
+
 - `START_URL`: URL inicial del listado. Por defecto usa el portal del desafío.
 - `OUTPUT_DIR`: carpeta de salida. Por defecto `scraped`.
 - `MAX_PAGES`: límite opcional de páginas a recorrer.

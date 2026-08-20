@@ -14,13 +14,16 @@ import {
   type RegistroDocumento,
 } from './lib/parser.js';
 
-const START_URL =
+// Constantes en español; los nombres de las variables de entorno se mantienen
+// en inglés para no romper los comandos ya existentes.
+const URL_INICIO =
   process.env.START_URL ?? 'https://jurisprudencia.pj.gob.pe/jurisprudenciaweb/faces/page/analisis-jurisprudencial.xhtml';
-const OUTPUT_DIR = process.env.OUTPUT_DIR ?? 'scraped';
-const MAX_PAGES = Number(process.env.MAX_PAGES ?? '0');
-const REQUEST_DELAY_MS = Number(process.env.REQUEST_DELAY_MS ?? '4000');
-const MAX_DOWNLOAD_ATTEMPTS = Number(process.env.MAX_DOWNLOAD_ATTEMPTS ?? '0');
-const SESSION_ATTEMPTS = Number(process.env.SESSION_ATTEMPTS ?? '5');
+const DIRECTORIO_SALIDA = process.env.OUTPUT_DIR ?? 'scraped';
+const MAX_PAGINAS = Number(process.env.MAX_PAGES ?? '0');
+const RETARDO_PETICION_MS = Number(process.env.REQUEST_DELAY_MS ?? '4000');
+const MAX_INTENTOS_DESCARGA = Number(process.env.MAX_DOWNLOAD_ATTEMPTS ?? '0');
+const INTENTOS_SESION = Number(process.env.SESSION_ATTEMPTS ?? '5');
+const REINTENTAR_FALLIDOS = process.env.RETRY_FAILED === '1';
 
 type ContenedorCookies = { valor: string };
 
@@ -47,10 +50,10 @@ type RegistroFallido = {
 
 // 1. Punto de entrada: recorre las páginas, descarga los PDFs y guarda las salidas.
 async function main(): Promise<void> {
-  await asegurarDirectorio(OUTPUT_DIR);
-  await asegurarDirectorio(`${OUTPUT_DIR}/pdfs`);
+  await asegurarDirectorio(DIRECTORIO_SALIDA);
+  await asegurarDirectorio(`${DIRECTORIO_SALIDA}/pdfs`);
 
-  if ((process.env.RETRY_FAILED ?? '0') === '1') {
+  if (REINTENTAR_FALLIDOS) {
     await reintentarDescargasFallidas();
     return;
   }
@@ -71,8 +74,8 @@ async function main(): Promise<void> {
 
     for (let i = 0; i < documentosPagina.length; i += 1) {
       const documento = documentosPagina[i];
-      if (MAX_DOWNLOAD_ATTEMPTS > 0 && intentosDescarga >= MAX_DOWNLOAD_ATTEMPTS) {
-        console.log(`Se alcanzó MAX_DOWNLOAD_ATTEMPTS=${MAX_DOWNLOAD_ATTEMPTS}`);
+      if (MAX_INTENTOS_DESCARGA > 0 && intentosDescarga >= MAX_INTENTOS_DESCARGA) {
+        console.log(`Se alcanzó MAX_DOWNLOAD_ATTEMPTS=${MAX_INTENTOS_DESCARGA}`);
         await guardarSalidas(documentos, descargasFallidas);
         return;
       }
@@ -106,13 +109,13 @@ async function main(): Promise<void> {
         }
       }
 
-      await pausa(REQUEST_DELAY_MS);
+      await pausa(RETARDO_PETICION_MS);
     }
 
     await guardarSalidas(documentos, descargasFallidas);
     totalGrupos = documentosPagina.reduce((maximo, documento) => Math.max(maximo, documento.grupo ?? 0), totalGrupos);
 
-    if (MAX_PAGES > 0 && numeroPagina >= MAX_PAGES) break;
+    if (MAX_PAGINAS > 0 && numeroPagina >= MAX_PAGINAS) break;
 
     const siguiente = extraerSiguientePagina(sesion.html);
     if (!siguiente.siguientePagina) break;
@@ -126,19 +129,19 @@ async function main(): Promise<void> {
       break;
     }
     numeroPagina += 1;
-    await pausa(REQUEST_DELAY_MS);
+    await pausa(RETARDO_PETICION_MS);
   }
 
   console.log(
     `\nResumen: ${totalEncontrados} documentos encontrados, ${descargasExitosas} PDFs descargados, ${descargasFallidas.length} fallidos.`
   );
-  console.log(`Datos extraídos: ${OUTPUT_DIR}/documents.json`);
-  console.log(`Descargas fallidas: ${OUTPUT_DIR}/failed.json`);
+  console.log(`Datos extraídos: ${DIRECTORIO_SALIDA}/documents.json`);
+  console.log(`Descargas fallidas: ${DIRECTORIO_SALIDA}/failed.json`);
 }
 
 // 2. Reintenta las descargas fallidas registradas en failed.json.
 async function reintentarDescargasFallidas(): Promise<void> {
-  const rutaFallidos = `${OUTPUT_DIR}/failed.json`;
+  const rutaFallidos = `${DIRECTORIO_SALIDA}/failed.json`;
   let fallidas: RegistroFallido[] = [];
   try {
     fallidas = JSON.parse(await readFile(rutaFallidos, 'utf8')) as RegistroFallido[];
@@ -181,7 +184,7 @@ async function reintentarDescargasFallidas(): Promise<void> {
       console.error(`Reintento fallido "${registro.title}": ${motivo}`);
       restantes.push({ ...registro, error: motivo, attemptedAt: new Date().toISOString() });
     }
-    await pausa(REQUEST_DELAY_MS);
+    await pausa(RETARDO_PETICION_MS);
   }
 
   await escribirJson(rutaFallidos, restantes);
@@ -193,8 +196,8 @@ async function guardarSalidas(
   documentos: RegistroExtraido[],
   descargasFallidas: RegistroFallido[]
 ): Promise<void> {
-  await escribirJson(`${OUTPUT_DIR}/documents.json`, documentos);
-  await escribirJson(`${OUTPUT_DIR}/failed.json`, descargasFallidas);
+  await escribirJson(`${DIRECTORIO_SALIDA}/documents.json`, documentos);
+  await escribirJson(`${DIRECTORIO_SALIDA}/failed.json`, descargasFallidas);
 }
 
 // 4. Escribe un archivo JSON con formato legible.
@@ -204,10 +207,10 @@ async function escribirJson(ruta: string, datos: unknown): Promise<void> {
 
 // 5. Establece una sesión JSF válida (GET inicial + búsqueda AJAX) con reintentos.
 async function establecerSesion(): Promise<Sesion> {
-  for (let intento = 1; intento <= SESSION_ATTEMPTS; intento += 1) {
+  for (let intento = 1; intento <= INTENTOS_SESION; intento += 1) {
     const cookies: ContenedorCookies = { valor: '' };
     try {
-      const paginaInicial = await obtenerPagina(START_URL, cookies);
+      const paginaInicial = await obtenerPagina(URL_INICIO, cookies);
       let estadoVista = extraerEstadoVista(paginaInicial.html);
       const html = await obtenerResultadosIniciales(estadoVista, cookies);
       estadoVista = extraerEstadoVista(html) || estadoVista;
@@ -218,8 +221,8 @@ async function establecerSesion(): Promise<Sesion> {
       return { html, estadoVista, cookies };
     } catch (error) {
       const motivo = error instanceof Error ? error.message : String(error);
-      console.warn(`No se pudo establecer la sesión (intento ${intento}/${SESSION_ATTEMPTS}): ${motivo}`);
-      if (intento === SESSION_ATTEMPTS) throw error;
+      console.warn(`No se pudo establecer la sesión (intento ${intento}/${INTENTOS_SESION}): ${motivo}`);
+      if (intento === INTENTOS_SESION) throw error;
       await pausa(2000);
     }
   }
@@ -260,7 +263,7 @@ async function obtenerResultadosIniciales(estadoVista: string, cookies: Contened
   payload.set('AJAX:EVENTS_COUNT', '1');
   payload.set('javax.faces.partial.ajax', 'true');
 
-  const respuesta = await solicitudConReintentos(START_URL, {
+  const respuesta = await solicitudConReintentos(URL_INICIO, {
     metodo: 'POST',
     cabeceras: {
       'user-agent': 'Mozilla/5.0 (compatible; ScraperChallenge/1.0)',
@@ -268,7 +271,7 @@ async function obtenerResultadosIniciales(estadoVista: string, cookies: Contened
       accept: 'application/xml, text/xml, */*; q=0.01',
       'faces-request': 'partial/ajax',
       origin: 'https://jurisprudencia.pj.gob.pe',
-      referer: START_URL,
+      referer: URL_INICIO,
     },
     datos: payload.toString(),
     cookies,
@@ -298,7 +301,7 @@ async function obtenerSiguientePagina(estadoVista: string, cookies: ContenedorCo
   payload.set('AJAX:EVENTS_COUNT', '1');
   payload.set('javax.faces.partial.ajax', 'true');
 
-  const respuesta = await solicitudConReintentos(START_URL, {
+  const respuesta = await solicitudConReintentos(URL_INICIO, {
     metodo: 'POST',
     cabeceras: {
       'user-agent': 'Mozilla/5.0 (compatible; ScraperChallenge/1.0)',
@@ -342,7 +345,7 @@ async function descargarDocumento(
     payload.set('ruta_doc', documento.rutaDoc);
   }
 
-  const respuesta = await solicitudConReintentos(START_URL, {
+  const respuesta = await solicitudConReintentos(URL_INICIO, {
     metodo: 'POST',
     cabeceras: {
       'user-agent': 'Mozilla/5.0 (compatible; ScraperChallenge/1.0)',
@@ -350,7 +353,7 @@ async function descargarDocumento(
       accept:
         'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7',
       origin: 'https://jurisprudencia.pj.gob.pe',
-      referer: START_URL,
+      referer: URL_INICIO,
     },
     datos: payload.toString(),
     cookies,
@@ -363,7 +366,7 @@ async function descargarDocumento(
   }
 
   const carpeta = String(documento.grupo ?? 'sin-grupo');
-  await asegurarDirectorio(`${OUTPUT_DIR}/pdfs/${carpeta}`);
+  await asegurarDirectorio(`${DIRECTORIO_SALIDA}/pdfs/${carpeta}`);
 
   const nombreArchivo =
     documento.kind === 'analisis'
@@ -374,7 +377,7 @@ async function descargarDocumento(
     throw new Error('La respuesta no es un PDF (sesión/ViewState expirado o error del servidor)');
   }
   const rutaArchivo = `${carpeta}/${nombreArchivo}`;
-  await writeFile(`${OUTPUT_DIR}/pdfs/${rutaArchivo}`, cuerpo);
+  await writeFile(`${DIRECTORIO_SALIDA}/pdfs/${rutaArchivo}`, cuerpo);
   return rutaArchivo;
 }
 
