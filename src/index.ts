@@ -41,6 +41,7 @@ async function main(): Promise<void> {
 
   let attemptedDownloads = 0;
   let successfulDownloads = 0;
+  let totalFound = 0;
   const documents: ExtractedRecord[] = [];
   const failedDownloads: FailedRecord[] = [];
   let session = await establishSession();
@@ -49,12 +50,10 @@ async function main(): Promise<void> {
   while (true) {
     const pageDocuments = parseDocumentsFromHtml(session.html);
     console.log(`Página ${pageCount}: ${pageDocuments.length} documentos`);
-    const pageRecords: ExtractedRecord[] = pageDocuments.map((document) => ({ ...document }));
-    documents.push(...pageRecords);
+    totalFound += pageDocuments.length;
 
     for (let i = 0; i < pageDocuments.length; i += 1) {
       const document = pageDocuments[i];
-      const record = pageRecords[i];
       if (MAX_DOWNLOAD_ATTEMPTS > 0 && attemptedDownloads >= MAX_DOWNLOAD_ATTEMPTS) {
         console.log(`Se alcanzó MAX_DOWNLOAD_ATTEMPTS=${MAX_DOWNLOAD_ATTEMPTS}`);
         await persistOutputs(documents, failedDownloads);
@@ -64,7 +63,7 @@ async function main(): Promise<void> {
       attemptedDownloads += 1;
       try {
         const savedFile = await downloadDocument(document, session.viewState, session.cookieJar);
-        record.pdfFile = savedFile;
+        documents.push({ ...document, pdfFile: savedFile });
         successfulDownloads += 1;
         console.log(`Descargado: ${document.title} -> ${savedFile}`);
       } catch (error) {
@@ -76,7 +75,7 @@ async function main(): Promise<void> {
             console.log('Reintentando con una sesión nueva...');
             session = await establishSession();
             const savedFile = await downloadDocument(document, session.viewState, session.cookieJar);
-            record.pdfFile = savedFile;
+            documents.push({ ...document, pdfFile: savedFile });
             successfulDownloads += 1;
             recovered = true;
             console.log(`Descargado (reintento): ${document.title} -> ${savedFile}`);
@@ -113,7 +112,7 @@ async function main(): Promise<void> {
   }
 
   console.log(
-    `\nResumen: ${documents.length} documentos encontrados, ${successfulDownloads} PDFs descargados, ${failedDownloads.length} fallidos.`
+    `\nResumen: ${totalFound} documentos encontrados, ${successfulDownloads} PDFs descargados, ${failedDownloads.length} fallidos.`
   );
   console.log(`Datos extraídos: ${OUTPUT_DIR}/documents.json`);
   console.log(`Descargas fallidas: ${OUTPUT_DIR}/failed.json`);

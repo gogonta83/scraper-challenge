@@ -54,9 +54,10 @@ npm run dev
 
 - `scraped/pdfs/`: PDFs descargados — `*_documento-completo.pdf` para el análisis
   completo de cada tarjeta y `Resolucion_*.pdf` para cada resolución individual.
-- `scraped/documents.json`: datos estructurados de todos los documentos encontrados
-  (título, número de recurso, sala, fecha, resumen, especialidad, uuid, parámetros de
-  detalle y nombre del PDF descargado).
+- `scraped/documents.json`: datos estructurados únicamente de los documentos
+  descargados (título, número de recurso, sala, fecha, resumen, especialidad, uuid,
+  parámetros de detalle y nombre del PDF). Si una descarga falla, el documento aparece
+  en `failed.json`, no aquí.
 - `scraped/failed.json`: documentos cuya descarga falló, con el motivo, para poder
   reintentarlos después con `RETRY_FAILED=1`.
 
