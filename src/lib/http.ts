@@ -1,135 +1,148 @@
 import axios from 'axios';
 
-export async function sleep(ms: number): Promise<void> {
+export type Cabeceras = Record<string, string | string[]>;
+
+type OpcionesReintento = {
+  reintentos: number;
+  esperaBaseMs: number;
+  esperaMaximaMs: number;
+};
+
+type OpcionesSolicitud = {
+  metodo?: 'GET' | 'POST';
+  cabeceras?: Record<string, string>;
+  datos?: string;
+  cookies?: { valor: string };
+  reintento: OpcionesReintento;
+};
+
+// Espera la cantidad de milisegundos indicada.
+export async function pausa(ms: number): Promise<void> {
   await new Promise((resolve) => setTimeout(resolve, ms));
 }
 
-type RetryOptions = {
-  retries: number;
-  baseDelayMs: number;
-  maxDelayMs: number;
-};
+function normalizarCabeceras(cabeceras: unknown): Cabeceras {
+  const resultado: Cabeceras = {};
+  if (!cabeceras || typeof cabeceras !== 'object') return resultado;
 
-function normalizeHeaders(headers: unknown): Record<string, string | string[]> {
-  const result: Record<string, string | string[]> = {};
-  if (!headers || typeof headers !== 'object') return result;
-
-  for (const [key, value] of Object.entries(headers as Record<string, unknown>)) {
-    if (typeof value === 'string' || Array.isArray(value)) {
-      result[key] = value;
-    } else if (value != null) {
-      result[key] = String(value);
+  for (const [clave, valor] of Object.entries(cabeceras as Record<string, unknown>)) {
+    if (typeof valor === 'string' || Array.isArray(valor)) {
+      resultado[clave] = valor;
+    } else if (valor != null) {
+      resultado[clave] = String(valor);
     }
   }
 
-  return result;
+  return resultado;
 }
 
-export async function requestWithRetry(
+// Envía una solicitud HTTP con reintentos (429 y 5xx) y backoff exponencial.
+export async function solicitudConReintentos(
   url: string,
-  options: {
-    method?: 'GET' | 'POST';
-    headers?: Record<string, string>;
-    data?: string;
-    responseType?: 'text' | 'arraybuffer';
-    cookie?: string;
-    cookieJar?: { value: string };
-    retry: RetryOptions;
-  }
-): Promise<{ status: number; headers: Record<string, string | string[]>; data: Buffer }> {
-  let lastError: unknown;
+  opciones: OpcionesSolicitud
+): Promise<{ codigo: number; cabeceras: Cabeceras; datos: Buffer }> {
+  let ultimoError: unknown;
 
-  for (let attempt = 0; attempt <= options.retry.retries; attempt += 1) {
+  for (let intento = 0; intento <= opciones.reintento.reintentos; intento += 1) {
     try {
-      const cookieValue = options.cookieJar?.value ?? options.cookie;
-      const response = await axios.request({
+      const valorCookie = opciones.cookies?.valor;
+      const respuesta = await axios.request({
         url,
-        method: options.method ?? 'GET',
+        method: opciones.metodo ?? 'GET',
         headers: {
-          ...options.headers,
-          ...(cookieValue ? { cookie: cookieValue } : {}),
+          ...opciones.cabeceras,
+          ...(valorCookie ? { cookie: valorCookie } : {}),
         },
-        data: options.data,
-        // Always request raw bytes: axios would otherwise decode text using the
-        // declared charset and mangle Latin-1 titles like "Análisis" into "An�lisis".
+        data: opciones.datos,
+        // Se piden siempre los bytes crudos: axios decodificaría con el charset
+        // declarado y convertiría títulos Latin-1 como "Análisis" en "An�lisis".
         responseType: 'arraybuffer',
         validateStatus: () => true,
       });
 
-      if (response.status !== 429 && response.status < 500) {
-        mergeSetCookies(response.headers, options.cookieJar);
+      // Se reintenta solo 429 (límite de peticiones) y errores 5xx transitorios.
+      if (respuesta.status !== 429 && respuesta.status < 500) {
+        fusionarCookies(respuesta.headers, opciones.cookies);
         return {
-          status: response.status,
-          headers: normalizeHeaders(response.headers),
-          data: response.data,
+          codigo: respuesta.status,
+          cabeceras: normalizarCabeceras(respuesta.headers),
+          datos: respuesta.data,
         };
       }
 
-      if (attempt === options.retry.retries) {
-        mergeSetCookies(response.headers, options.cookieJar);
+      if (intento === opciones.reintento.reintentos) {
+        fusionarCookies(respuesta.headers, opciones.cookies);
         return {
-          status: response.status,
-          headers: normalizeHeaders(response.headers),
-          data: response.data,
+          codigo: respuesta.status,
+          cabeceras: normalizarCabeceras(respuesta.headers),
+          datos: respuesta.data,
         };
       }
 
-      const retryAfter = Number(response.headers['retry-after'] ?? NaN);
-      const backoffMs = Math.min(options.retry.maxDelayMs, options.retry.baseDelayMs * 2 ** attempt);
-      await sleep(Math.max(Number.isFinite(retryAfter) ? retryAfter * 1000 : 0, backoffMs));
+      const reintentoTras = Number(respuesta.headers['retry-after'] ?? NaN);
+      const esperaMs = Math.min(
+        opciones.reintento.esperaMaximaMs,
+        opciones.reintento.esperaBaseMs * 2 ** intento
+      );
+      await pausa(Math.max(Number.isFinite(reintentoTras) ? reintentoTras * 1000 : 0, esperaMs));
     } catch (error) {
-      lastError = error;
-      if (attempt === options.retry.retries) throw error;
-      const backoffMs = Math.min(options.retry.maxDelayMs, options.retry.baseDelayMs * 2 ** attempt);
-      await sleep(backoffMs);
+      ultimoError = error;
+      if (intento === opciones.reintento.reintentos) throw error;
+      const esperaMs = Math.min(
+        opciones.reintento.esperaMaximaMs,
+        opciones.reintento.esperaBaseMs * 2 ** intento
+      );
+      await pausa(esperaMs);
     }
   }
 
-  throw lastError instanceof Error ? lastError : new Error('Request failed');
+  throw ultimoError instanceof Error ? ultimoError : new Error('La solicitud falló');
 }
 
-export function decodeText(data: Buffer): string {
+// Decodifica el cuerpo de una respuesta: primero UTF-8 estricto y, si falla,
+// Windows-1252 (el portal declara ISO-8859-1 pero envía texto Latin-1 de un byte).
+export function decodificarTexto(datos: Buffer): string {
   try {
-    return new TextDecoder('utf-8', { fatal: true }).decode(data);
+    return new TextDecoder('utf-8', { fatal: true }).decode(datos);
   } catch {
-    // The portal declares charset=ISO-8859-1 but sends single-byte Latin-1 text.
-    return new TextDecoder('windows-1252').decode(data);
+    return new TextDecoder('windows-1252').decode(datos);
   }
 }
 
-function mergeSetCookies(
-  headers: Record<string, unknown>,
-  cookieJar?: { value: string }
-): void {
-  if (!cookieJar) return;
-  const raw = headers['set-cookie'];
-  const values = Array.isArray(raw)
-    ? raw
-    : raw
-      ? [raw]
+function fusionarCookies(cabeceras: Record<string, unknown>, contenedor?: { valor: string }): void {
+  if (!contenedor) return;
+  const cruda = cabeceras['set-cookie'];
+  const valores = Array.isArray(cruda)
+    ? cruda
+    : cruda
+      ? [cruda]
       : [];
-  if (values.length === 0) return;
+  if (valores.length === 0) return;
 
-  const entries = new Map<string, string>();
-  for (const piece of `${cookieJar.value}; ${values.map((v) => String(v).split(';')[0]).join('; ')}`.split(';')) {
-    const trimmed = piece.trim();
-    if (!trimmed) continue;
-    const eq = trimmed.indexOf('=');
-    if (eq > 0) entries.set(trimmed.slice(0, eq).trim(), trimmed);
+  const entradas = new Map<string, string>();
+  for (const parte of `${contenedor.valor}; ${valores.map((v) => String(v).split(';')[0]).join('; ')}`.split(';')) {
+    const recortada = parte.trim();
+    if (!recortada) continue;
+    const igual = recortada.indexOf('=');
+    if (igual > 0) entradas.set(recortada.slice(0, igual).trim(), recortada);
   }
-  cookieJar.value = [...entries.values()].join('; ');
+  contenedor.valor = [...entradas.values()].join('; ');
 }
 
-export async function ensureDirPath(path: string): Promise<void> {
+// Crea el directorio indicado (y sus padres) si no existe.
+export async function asegurarDirectorio(ruta: string): Promise<void> {
   const fs = await import('node:fs/promises');
-  await fs.mkdir(path, { recursive: true });
+  await fs.mkdir(ruta, { recursive: true });
 }
 
-export function sanitizeFileName(name: string): string {
-  return name
-    .normalize('NFC')
-    .replace(/[\\/:*?"<>|\u0000-\u001f]/g, '_')
-    .replace(/\s+/g, ' ')
-    .trim()
-    .slice(0, 180) || 'document';
+// Convierte un texto en un nombre de archivo seguro para el sistema operativo.
+export function sanitizarNombreArchivo(nombre: string): string {
+  return (
+    nombre
+      .normalize('NFC')
+      .replace(/[\\/:*?"<>|\u0000-\u001f]/g, '_')
+      .replace(/\s+/g, ' ')
+      .trim()
+      .slice(0, 180) || 'documento'
+  );
 }

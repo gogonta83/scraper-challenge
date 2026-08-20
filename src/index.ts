@@ -1,6 +1,18 @@
 import { readFile, writeFile } from 'node:fs/promises';
-import { decodeText, ensureDirPath, requestWithRetry, sanitizeFileName, sleep } from './lib/http.js';
-import { extractNextPagePayload, extractViewState, parseDocumentsFromHtml, type DocumentRecord } from './lib/parser.js';
+import {
+  asegurarDirectorio,
+  decodificarTexto,
+  pausa,
+  sanitizarNombreArchivo,
+  solicitudConReintentos,
+  type Cabeceras,
+} from './lib/http.js';
+import {
+  extraerEstadoVista,
+  extraerSiguientePagina,
+  parsearDocumentos,
+  type RegistroDocumento,
+} from './lib/parser.js';
 
 const START_URL =
   process.env.START_URL ?? 'https://jurisprudencia.pj.gob.pe/jurisprudenciaweb/faces/page/analisis-jurisprudencial.xhtml';
@@ -10,17 +22,19 @@ const REQUEST_DELAY_MS = Number(process.env.REQUEST_DELAY_MS ?? '4000');
 const MAX_DOWNLOAD_ATTEMPTS = Number(process.env.MAX_DOWNLOAD_ATTEMPTS ?? '1');
 const SESSION_ATTEMPTS = Number(process.env.SESSION_ATTEMPTS ?? '5');
 
-type Session = {
+type ContenedorCookies = { valor: string };
+
+type Sesion = {
   html: string;
-  viewState: string;
-  cookieJar: { value: string };
+  estadoVista: string;
+  cookies: ContenedorCookies;
 };
 
-type ExtractedRecord = DocumentRecord & {
+type RegistroExtraido = RegistroDocumento & {
   pdfFile?: string;
 };
 
-type FailedRecord = {
+type RegistroFallido = {
   title: string;
   number?: string;
   uuid?: string;
@@ -30,195 +44,207 @@ type FailedRecord = {
   attemptedAt: string;
 };
 
+// 1. Punto de entrada: recorre las páginas, descarga los PDFs y guarda las salidas.
 async function main(): Promise<void> {
-  await ensureDirPath(OUTPUT_DIR);
-  await ensureDirPath(`${OUTPUT_DIR}/pdfs`);
+  await asegurarDirectorio(OUTPUT_DIR);
+  await asegurarDirectorio(`${OUTPUT_DIR}/pdfs`);
 
   if ((process.env.RETRY_FAILED ?? '0') === '1') {
-    await retryFailedDownloads();
+    await reintentarDescargasFallidas();
     return;
   }
 
-  let attemptedDownloads = 0;
-  let successfulDownloads = 0;
-  let totalFound = 0;
-  const documents: ExtractedRecord[] = [];
-  const failedDownloads: FailedRecord[] = [];
-  let session = await establishSession();
-  let pageCount = 1;
+  let intentosDescarga = 0;
+  let descargasExitosas = 0;
+  let totalEncontrados = 0;
+  const documentos: RegistroExtraido[] = [];
+  const descargasFallidas: RegistroFallido[] = [];
+  let sesion = await establecerSesion();
+  let numeroPagina = 1;
 
   while (true) {
-    const pageDocuments = parseDocumentsFromHtml(session.html);
-    console.log(`Página ${pageCount}: ${pageDocuments.length} documentos`);
-    totalFound += pageDocuments.length;
+    const documentosPagina = parsearDocumentos(sesion.html);
+    console.log(`Página ${numeroPagina}: ${documentosPagina.length} documentos`);
+    totalEncontrados += documentosPagina.length;
 
-    for (let i = 0; i < pageDocuments.length; i += 1) {
-      const document = pageDocuments[i];
-      if (MAX_DOWNLOAD_ATTEMPTS > 0 && attemptedDownloads >= MAX_DOWNLOAD_ATTEMPTS) {
+    for (let i = 0; i < documentosPagina.length; i += 1) {
+      const documento = documentosPagina[i];
+      if (MAX_DOWNLOAD_ATTEMPTS > 0 && intentosDescarga >= MAX_DOWNLOAD_ATTEMPTS) {
         console.log(`Se alcanzó MAX_DOWNLOAD_ATTEMPTS=${MAX_DOWNLOAD_ATTEMPTS}`);
-        await persistOutputs(documents, failedDownloads);
+        await guardarSalidas(documentos, descargasFallidas);
         return;
       }
 
-      attemptedDownloads += 1;
+      intentosDescarga += 1;
       try {
-        const savedFile = await downloadDocument(document, session.viewState, session.cookieJar);
-        documents.push({ ...document, pdfFile: savedFile });
-        successfulDownloads += 1;
-        console.log(`Descargado: ${document.title} -> ${savedFile}`);
+        const archivoGuardado = await descargarDocumento(documento, sesion.estadoVista, sesion.cookies);
+        documentos.push({ ...documento, pdfFile: archivoGuardado });
+        descargasExitosas += 1;
+        console.log(`Descargado: ${documento.title} -> ${archivoGuardado}`);
       } catch (error) {
-        const reason = error instanceof Error ? error.message : String(error);
-        console.error(`Fallo "${document.title}": ${reason}`);
-        let recovered = false;
-        if (isSessionError(reason)) {
+        const motivo = error instanceof Error ? error.message : String(error);
+        console.error(`Fallo "${documento.title}": ${motivo}`);
+        let recuperado = false;
+        if (esErrorDeSesion(motivo)) {
           try {
             console.log('Reintentando con una sesión nueva...');
-            session = await establishSession();
-            const savedFile = await downloadDocument(document, session.viewState, session.cookieJar);
-            documents.push({ ...document, pdfFile: savedFile });
-            successfulDownloads += 1;
-            recovered = true;
-            console.log(`Descargado (reintento): ${document.title} -> ${savedFile}`);
-          } catch (retryError) {
-            const retryReason = retryError instanceof Error ? retryError.message : String(retryError);
-            console.error(`Fallo en el reintento "${document.title}": ${retryReason}`);
+            sesion = await establecerSesion();
+            const archivoGuardado = await descargarDocumento(documento, sesion.estadoVista, sesion.cookies);
+            documentos.push({ ...documento, pdfFile: archivoGuardado });
+            descargasExitosas += 1;
+            recuperado = true;
+            console.log(`Descargado (reintento): ${documento.title} -> ${archivoGuardado}`);
+          } catch (errorReintento) {
+            const motivoReintento = errorReintento instanceof Error ? errorReintento.message : String(errorReintento);
+            console.error(`Fallo en el reintento "${documento.title}": ${motivoReintento}`);
           }
         }
-        if (!recovered) {
-          failedDownloads.push(toFailedRecord(document, reason));
+        if (!recuperado) {
+          descargasFallidas.push(crearRegistroFallido(documento, motivo));
         }
       }
 
-      await sleep(REQUEST_DELAY_MS);
+      await pausa(REQUEST_DELAY_MS);
     }
 
-    await persistOutputs(documents, failedDownloads);
+    await guardarSalidas(documentos, descargasFallidas);
 
-    if (MAX_PAGES > 0 && pageCount >= MAX_PAGES) break;
+    if (MAX_PAGES > 0 && numeroPagina >= MAX_PAGES) break;
 
-    const nextPayload = extractNextPagePayload(session.html);
-    if (!nextPayload.nextPage) break;
+    const siguiente = extraerSiguientePagina(sesion.html);
+    if (!siguiente.siguientePagina) break;
 
     try {
-      session.html = await fetchNextPage(session.viewState, session.cookieJar);
-      session.viewState = extractViewState(session.html) || session.viewState;
+      sesion.html = await obtenerSiguientePagina(sesion.estadoVista, sesion.cookies);
+      sesion.estadoVista = extraerEstadoVista(sesion.html) || sesion.estadoVista;
     } catch (error) {
-      const reason = error instanceof Error ? error.message : String(error);
-      console.error(`No se pudo avanzar a la página ${pageCount + 1}: ${reason}`);
+      const motivo = error instanceof Error ? error.message : String(error);
+      console.error(`No se pudo avanzar a la página ${numeroPagina + 1}: ${motivo}`);
       break;
     }
-    pageCount += 1;
-    await sleep(REQUEST_DELAY_MS);
+    numeroPagina += 1;
+    await pausa(REQUEST_DELAY_MS);
   }
 
   console.log(
-    `\nResumen: ${totalFound} documentos encontrados, ${successfulDownloads} PDFs descargados, ${failedDownloads.length} fallidos.`
+    `\nResumen: ${totalEncontrados} documentos encontrados, ${descargasExitosas} PDFs descargados, ${descargasFallidas.length} fallidos.`
   );
   console.log(`Datos extraídos: ${OUTPUT_DIR}/documents.json`);
   console.log(`Descargas fallidas: ${OUTPUT_DIR}/failed.json`);
 }
 
-async function retryFailedDownloads(): Promise<void> {
-  const failedPath = `${OUTPUT_DIR}/failed.json`;
-  let failed: FailedRecord[] = [];
+// 2. Reintenta las descargas fallidas registradas en failed.json.
+async function reintentarDescargasFallidas(): Promise<void> {
+  const rutaFallidos = `${OUTPUT_DIR}/failed.json`;
+  let fallidas: RegistroFallido[] = [];
   try {
-    failed = JSON.parse(await readFile(failedPath, 'utf8')) as FailedRecord[];
+    fallidas = JSON.parse(await readFile(rutaFallidos, 'utf8')) as RegistroFallido[];
   } catch {
-    console.log(`No existe ${failedPath}; no hay descargas fallidas que reintentar.`);
+    console.log(`No existe ${rutaFallidos}; no hay descargas fallidas que reintentar.`);
     return;
   }
 
-  const pending = failed.filter((entry) => entry.downloadButtonName && (entry.uuid || entry.rutaDoc));
-  if (pending.length === 0) {
+  const pendientes = fallidas.filter(
+    (registro) => registro.downloadButtonName && (registro.uuid || registro.rutaDoc)
+  );
+  if (pendientes.length === 0) {
     console.log('No hay descargas fallidas pendientes.');
     return;
   }
 
-  console.log(`Reintentando ${pending.length} descargas fallidas...`);
-  const session = await establishSession();
-  const remaining: FailedRecord[] = [];
-  let ok = 0;
+  console.log(`Reintentando ${pendientes.length} descargas fallidas...`);
+  const sesion = await establecerSesion();
+  const restantes: RegistroFallido[] = [];
+  let exitosos = 0;
 
-  for (const entry of pending) {
-    const document: DocumentRecord = {
+  for (const registro of pendientes) {
+    const documento: RegistroDocumento = {
       index: -1,
-      kind: entry.uuid ? 'resolucion' : 'analisis',
-      title: entry.title,
-      number: entry.number,
-      uuid: entry.uuid,
-      rutaDoc: entry.rutaDoc,
-      downloadButtonName: entry.downloadButtonName,
+      kind: registro.uuid ? 'resolucion' : 'analisis',
+      title: registro.title,
+      number: registro.number,
+      uuid: registro.uuid,
+      rutaDoc: registro.rutaDoc,
+      downloadButtonName: registro.downloadButtonName,
       detailParams: {},
     };
     try {
-      const savedFile = await downloadDocument(document, session.viewState, session.cookieJar);
-      ok += 1;
-      console.log(`Reintento OK: ${entry.title} -> ${savedFile}`);
+      const archivoGuardado = await descargarDocumento(documento, sesion.estadoVista, sesion.cookies);
+      exitosos += 1;
+      console.log(`Reintento OK: ${registro.title} -> ${archivoGuardado}`);
     } catch (error) {
-      const reason = error instanceof Error ? error.message : String(error);
-      console.error(`Reintento fallido "${entry.title}": ${reason}`);
-      remaining.push({ ...entry, error: reason, attemptedAt: new Date().toISOString() });
+      const motivo = error instanceof Error ? error.message : String(error);
+      console.error(`Reintento fallido "${registro.title}": ${motivo}`);
+      restantes.push({ ...registro, error: motivo, attemptedAt: new Date().toISOString() });
     }
-    await sleep(REQUEST_DELAY_MS);
+    await pausa(REQUEST_DELAY_MS);
   }
 
-  await writeJson(failedPath, remaining);
-  console.log(`Reintentos: ${ok} OK, ${remaining.length} siguen fallando.`);
+  await escribirJson(rutaFallidos, restantes);
+  console.log(`Reintentos: ${exitosos} OK, ${restantes.length} siguen fallando.`);
 }
 
-async function persistOutputs(documents: ExtractedRecord[], failedDownloads: FailedRecord[]): Promise<void> {
-  await writeJson(`${OUTPUT_DIR}/documents.json`, documents);
-  await writeJson(`${OUTPUT_DIR}/failed.json`, failedDownloads);
+// 3. Guarda los datos extraídos (documents.json) y las descargas fallidas (failed.json).
+async function guardarSalidas(
+  documentos: RegistroExtraido[],
+  descargasFallidas: RegistroFallido[]
+): Promise<void> {
+  await escribirJson(`${OUTPUT_DIR}/documents.json`, documentos);
+  await escribirJson(`${OUTPUT_DIR}/failed.json`, descargasFallidas);
 }
 
-async function writeJson(path: string, data: unknown): Promise<void> {
-  await writeFile(path, JSON.stringify(data, null, 2));
+// 4. Escribe un archivo JSON con formato legible.
+async function escribirJson(ruta: string, datos: unknown): Promise<void> {
+  await writeFile(ruta, JSON.stringify(datos, null, 2));
 }
 
-async function establishSession(): Promise<Session> {
-  for (let attempt = 1; attempt <= SESSION_ATTEMPTS; attempt += 1) {
-    const cookieJar = { value: '' };
+// 5. Establece una sesión JSF válida (GET inicial + búsqueda AJAX) con reintentos.
+async function establecerSesion(): Promise<Sesion> {
+  for (let intento = 1; intento <= SESSION_ATTEMPTS; intento += 1) {
+    const cookies: ContenedorCookies = { valor: '' };
     try {
-      const initialPage = await fetchPage(START_URL, cookieJar);
-      let viewState = extractViewState(initialPage.html);
-      const html = await fetchInitialResults(viewState, cookieJar);
-      viewState = extractViewState(html) || viewState;
-      if (!viewState) {
+      const paginaInicial = await obtenerPagina(START_URL, cookies);
+      let estadoVista = extraerEstadoVista(paginaInicial.html);
+      const html = await obtenerResultadosIniciales(estadoVista, cookies);
+      estadoVista = extraerEstadoVista(html) || estadoVista;
+      if (!estadoVista) {
         throw new Error('No se pudo extraer el ViewState de la sesión');
       }
-      console.log(`Listo. ViewState: ${viewState ? 'sí' : 'no'}`);
-      return { html, viewState, cookieJar };
+      console.log(`Listo. ViewState: ${estadoVista ? 'sí' : 'no'}`);
+      return { html, estadoVista, cookies };
     } catch (error) {
-      const reason = error instanceof Error ? error.message : String(error);
-      console.warn(`No se pudo establecer la sesión (intento ${attempt}/${SESSION_ATTEMPTS}): ${reason}`);
-      if (attempt === SESSION_ATTEMPTS) throw error;
-      await sleep(2000);
+      const motivo = error instanceof Error ? error.message : String(error);
+      console.warn(`No se pudo establecer la sesión (intento ${intento}/${SESSION_ATTEMPTS}): ${motivo}`);
+      if (intento === SESSION_ATTEMPTS) throw error;
+      await pausa(2000);
     }
   }
   throw new Error('No se pudo establecer la sesión');
 }
 
-async function fetchPage(url: string, cookieJar: { value: string }): Promise<{ html: string }> {
+// 6. Obtiene la página inicial del portal.
+async function obtenerPagina(url: string, cookies: ContenedorCookies): Promise<{ html: string }> {
   console.log(`GET ${url}`);
-  const response = await requestWithRetry(url, {
-    method: 'GET',
-    headers: {
+  const respuesta = await solicitudConReintentos(url, {
+    metodo: 'GET',
+    cabeceras: {
       'user-agent': 'Mozilla/5.0 (compatible; ScraperChallenge/1.0)',
       accept: 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
     },
-    cookieJar,
-    retry: { retries: 5, baseDelayMs: 1500, maxDelayMs: 30000 },
+    cookies,
+    reintento: { reintentos: 5, esperaBaseMs: 1500, esperaMaximaMs: 30000 },
   });
 
   return {
-    html: decodeText(response.data),
+    html: decodificarTexto(respuesta.datos),
   };
 }
 
-async function fetchInitialResults(viewState: string, cookieJar: { value: string }): Promise<string> {
+// 7. Ejecuta la búsqueda inicial (POST AJAX) que carga el listado de resultados.
+async function obtenerResultadosIniciales(estadoVista: string, cookies: ContenedorCookies): Promise<string> {
   const payload = new URLSearchParams();
   payload.set('formBoletin', 'formBoletin');
-  payload.set('javax.faces.ViewState', viewState ?? '');
+  payload.set('javax.faces.ViewState', estadoVista ?? '');
   payload.set('formBoletin:txtTitulo', '');
   payload.set('formBoletin:buTipPublicacion', '7');
   payload.set('formBoletin:buEspecialidad', '0');
@@ -230,9 +256,9 @@ async function fetchInitialResults(viewState: string, cookieJar: { value: string
   payload.set('AJAX:EVENTS_COUNT', '1');
   payload.set('javax.faces.partial.ajax', 'true');
 
-  const response = await requestWithRetry(START_URL, {
-    method: 'POST',
-    headers: {
+  const respuesta = await solicitudConReintentos(START_URL, {
+    metodo: 'POST',
+    cabeceras: {
       'user-agent': 'Mozilla/5.0 (compatible; ScraperChallenge/1.0)',
       'content-type': 'application/x-www-form-urlencoded',
       accept: 'application/xml, text/xml, */*; q=0.01',
@@ -240,23 +266,24 @@ async function fetchInitialResults(viewState: string, cookieJar: { value: string
       origin: 'https://jurisprudencia.pj.gob.pe',
       referer: START_URL,
     },
-    data: payload.toString(),
-    cookieJar,
-    retry: { retries: 5, baseDelayMs: 1500, maxDelayMs: 30000 },
+    datos: payload.toString(),
+    cookies,
+    reintento: { reintentos: 5, esperaBaseMs: 1500, esperaMaximaMs: 30000 },
   });
 
-  const html = decodeText(response.data);
-  ensureNotErrorResponse(html);
+  const html = decodificarTexto(respuesta.datos);
+  verificarRespuestaSinError(html);
   return html;
 }
 
-async function fetchNextPage(viewState: string, cookieJar: { value: string }): Promise<string> {
+// 8. Solicita la siguiente página del listado usando el DataScroller de RichFaces.
+async function obtenerSiguientePagina(estadoVista: string, cookies: ContenedorCookies): Promise<string> {
   const payload = new URLSearchParams();
   payload.set('formBoletin', 'formBoletin');
   payload.set('formBoletin:txtTitulo', '');
   payload.set('formBoletin:buTipPublicacion', '7');
   payload.set('formBoletin:buEspecialidad', '0');
-  payload.set('javax.faces.ViewState', viewState ?? '');
+  payload.set('javax.faces.ViewState', estadoVista ?? '');
   payload.set('javax.faces.source', 'formBoletin:data2');
   payload.set('javax.faces.partial.event', 'rich:datascroller:onscroll');
   payload.set('javax.faces.partial.execute', 'formBoletin:data2 @component');
@@ -267,30 +294,31 @@ async function fetchNextPage(viewState: string, cookieJar: { value: string }): P
   payload.set('AJAX:EVENTS_COUNT', '1');
   payload.set('javax.faces.partial.ajax', 'true');
 
-  const response = await requestWithRetry(START_URL, {
-    method: 'POST',
-    headers: {
+  const respuesta = await solicitudConReintentos(START_URL, {
+    metodo: 'POST',
+    cabeceras: {
       'user-agent': 'Mozilla/5.0 (compatible; ScraperChallenge/1.0)',
       'content-type': 'application/x-www-form-urlencoded; charset=UTF-8',
       accept: 'application/xml, text/xml, */*; q=0.01',
       'faces-request': 'partial/ajax',
     },
-    data: payload.toString(),
-    cookieJar,
-    retry: { retries: 5, baseDelayMs: 1500, maxDelayMs: 30000 },
+    datos: payload.toString(),
+    cookies,
+    reintento: { reintentos: 5, esperaBaseMs: 1500, esperaMaximaMs: 30000 },
   });
 
-  const html = decodeText(response.data);
-  ensureNotErrorResponse(html);
+  const html = decodificarTexto(respuesta.datos);
+  verificarRespuestaSinError(html);
   return html;
 }
 
-async function downloadDocument(
-  document: DocumentRecord,
-  viewState: string,
-  cookieJar: { value: string }
+// 9. Descarga el PDF de un documento (análisis completo o resolución) y valida el resultado.
+async function descargarDocumento(
+  documento: RegistroDocumento,
+  estadoVista: string,
+  cookies: ContenedorCookies
 ): Promise<string> {
-  if (!viewState) {
+  if (!estadoVista) {
     throw new Error('No hay ViewState para descargar (sesión inválida)');
   }
 
@@ -299,20 +327,20 @@ async function downloadDocument(
   payload.set('formBoletin:txtTitulo', '');
   payload.set('formBoletin:buTipPublicacion', '7');
   payload.set('formBoletin:buEspecialidad', '0');
-  payload.set('javax.faces.ViewState', viewState);
-  if (document.downloadButtonName) {
-    payload.set(document.downloadButtonName, document.downloadButtonName);
+  payload.set('javax.faces.ViewState', estadoVista);
+  if (documento.downloadButtonName) {
+    payload.set(documento.downloadButtonName, documento.downloadButtonName);
   }
-  if (document.uuid) {
-    payload.set('uuid', document.uuid);
+  if (documento.uuid) {
+    payload.set('uuid', documento.uuid);
   }
-  if (document.rutaDoc) {
-    payload.set('ruta_doc', document.rutaDoc);
+  if (documento.rutaDoc) {
+    payload.set('ruta_doc', documento.rutaDoc);
   }
 
-  const response = await requestWithRetry(START_URL, {
-    method: 'POST',
-    headers: {
+  const respuesta = await solicitudConReintentos(START_URL, {
+    metodo: 'POST',
+    cabeceras: {
       'user-agent': 'Mozilla/5.0 (compatible; ScraperChallenge/1.0)',
       'content-type': 'application/x-www-form-urlencoded; charset=UTF-8',
       accept:
@@ -320,66 +348,69 @@ async function downloadDocument(
       origin: 'https://jurisprudencia.pj.gob.pe',
       referer: START_URL,
     },
-    data: payload.toString(),
-    responseType: 'arraybuffer',
-    cookieJar,
-    retry: { retries: 5, baseDelayMs: 2000, maxDelayMs: 60000 },
+    datos: payload.toString(),
+    cookies,
+    reintento: { reintentos: 5, esperaBaseMs: 2000, esperaMaximaMs: 60000 },
   });
 
-  if (response.status >= 400) {
-    const errorBody = Buffer.from(response.data).subarray(0, 300).toString('latin1');
-    throw new Error(`HTTP ${response.status} ${errorBody}`);
+  if (respuesta.codigo >= 400) {
+    const cuerpoError = Buffer.from(respuesta.datos).subarray(0, 300).toString('latin1');
+    throw new Error(`HTTP ${respuesta.codigo} ${cuerpoError}`);
   }
 
-  const filename =
-    document.kind === 'analisis'
-      ? `${sanitizeFileName(document.title)}_documento-completo.pdf`
-      : getFilenameFromHeaders(response.headers) ?? `${sanitizeFileName(document.title)}.pdf`;
-  const body = Buffer.from(response.data);
-  if (body.length < 5 || body.toString('latin1', 0, 5) !== '%PDF-') {
+  const nombreArchivo =
+    documento.kind === 'analisis'
+      ? `${sanitizarNombreArchivo(documento.title)}_documento-completo.pdf`
+      : obtenerNombreArchivoDeCabeceras(respuesta.cabeceras) ?? `${sanitizarNombreArchivo(documento.title)}.pdf`;
+  const cuerpo = Buffer.from(respuesta.datos);
+  if (cuerpo.length < 5 || cuerpo.toString('latin1', 0, 5) !== '%PDF-') {
     throw new Error('La respuesta no es un PDF (sesión/ViewState expirado o error del servidor)');
   }
-  await writeFile(`${OUTPUT_DIR}/pdfs/${filename}`, body);
-  return filename;
+  await writeFile(`${OUTPUT_DIR}/pdfs/${nombreArchivo}`, cuerpo);
+  return nombreArchivo;
 }
 
-function toFailedRecord(document: DocumentRecord, error: string): FailedRecord {
+// 10. Convierte un documento fallido en su registro para failed.json.
+function crearRegistroFallido(documento: RegistroDocumento, error: string): RegistroFallido {
   return {
-    title: document.title,
-    number: document.number,
-    uuid: document.uuid,
-    rutaDoc: document.rutaDoc,
-    downloadButtonName: document.downloadButtonName,
+    title: documento.title,
+    number: documento.number,
+    uuid: documento.uuid,
+    rutaDoc: documento.rutaDoc,
+    downloadButtonName: documento.downloadButtonName,
     error,
     attemptedAt: new Date().toISOString(),
   };
 }
 
-function getFilenameFromHeaders(headers: Record<string, string | string[]>): string | undefined {
-  const raw = headers['content-disposition'];
-  const value = Array.isArray(raw) ? raw[0] : raw;
-  const match = value?.match(/filename="?([^"]+)"?/i);
-  return match?.[1];
+// 11. Obtiene el nombre del archivo desde la cabecera content-disposition.
+function obtenerNombreArchivoDeCabeceras(cabeceras: Cabeceras): string | undefined {
+  const cruda = cabeceras['content-disposition'];
+  const valor = Array.isArray(cruda) ? cruda[0] : cruda;
+  const coincidencia = valor?.match(/filename="?([^"]+)"?/i);
+  return coincidencia?.[1];
 }
 
-function ensureNotErrorResponse(html: string): void {
-  const errorName = html.match(/<partial-response>\s*<error>[\s\S]*?<error-name>([^<]*)</i)?.[1];
-  if (errorName) {
-    throw new Error(`Respuesta parcial con error del servidor: ${errorName.trim()}`);
+// 12. Lanza un error si la respuesta AJAX contiene un error del servidor (ViewExpired, etc.).
+function verificarRespuestaSinError(html: string): void {
+  const nombreError = html.match(/<partial-response>\s*<error>[\s\S]*?<error-name>([^<]*)</i)?.[1];
+  if (nombreError) {
+    throw new Error(`Respuesta parcial con error del servidor: ${nombreError.trim()}`);
   }
 }
 
-function isSessionError(reason: string): boolean {
+// 13. Indica si un error requiere reestablecer la sesión antes de reintentar.
+function esErrorDeSesion(motivo: string): boolean {
   return (
-    reason.includes('ViewState') ||
-    reason.includes('ViewExpired') ||
-    reason.includes('no es un PDF') ||
-    reason.includes('Respuesta parcial')
+    motivo.includes('ViewState') ||
+    motivo.includes('ViewExpired') ||
+    motivo.includes('no es un PDF') ||
+    motivo.includes('Respuesta parcial')
   );
 }
 
 void main().catch((error) => {
-  const message = error instanceof Error ? error.stack ?? error.message : String(error);
-  console.error(message);
+  const mensaje = error instanceof Error ? error.stack ?? error.message : String(error);
+  console.error(mensaje);
   process.exitCode = 1;
 });
