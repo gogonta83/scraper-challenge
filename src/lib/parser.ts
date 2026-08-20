@@ -1,20 +1,28 @@
 import * as cheerio from 'cheerio';
 
-export type RegistroDocumento = {
+export type CamposFormulario = Record<string, string>;
+
+export type RegistroResultado = {
   index: number;
-  grupo?: number;
-  kind?: 'analisis' | 'resolucion';
-  title: string;
-  number?: string;
-  room?: string;
-  date?: string;
-  summary?: string;
+  grupo: number;
+  tipoRecurso?: string;
+  nroexp?: string;
   especialidad?: string;
+  tipoResolucion?: string;
+  fechaResolucion?: string;
+  organoJurisdiccional?: string;
+  pretension?: string;
+  sumilla?: string;
+  palabrasClave?: string;
   uuid?: string;
-  rutaDoc?: string;
-  downloadButtonName?: string;
-  detailParams: Record<string, string>;
+  rutaDescarga?: string;
+  fichaSourceId?: string;
+  fichaParams: Record<string, string>;
 };
+
+export type DescargaFicha = { uuid: string; formato: 'pdf' | 'doc' };
+
+export type DatosFicha = Record<string, string>;
 
 function limpiar(valor: string | undefined): string | undefined {
   const texto = valor?.replace(/\s+/g, ' ').trim();
@@ -39,18 +47,6 @@ function extraerCdata(html: string): string {
   return bloquesCdata.length === 0 ? html : bloquesCdata.map((coincidencia) => coincidencia[1]).join('\n');
 }
 
-function parsearParametrosDescarga(onclick: string): Record<string, string> {
-  const parametros: Record<string, string> = {};
-  const coincidencia = onclick.match(/mojarra\.jsfcljs\(document\.getElementById\('formBoletin'\),\{([\s\S]*?)\},''\)/i);
-  if (!coincidencia) return parametros;
-
-  const entradas = Array.from(coincidencia[1].matchAll(/'([^']+)'\s*:\s*'([^']*)'/g));
-  for (const [, clave, valor] of entradas) {
-    parametros[clave] = valor;
-  }
-  return parametros;
-}
-
 // Desescapa una cadena JavaScript: \\u002D -> -, \\\/ -> /, \\n -> salto de línea, etc.
 function desescaparCadenaJs(valor: string): string {
   return valor
@@ -64,11 +60,28 @@ function desescaparCadenaJs(valor: string): string {
     .replace(/\\\\/g, '\\');
 }
 
-function parsearParametrosDetalle(onclick: string): Record<string, string> {
+// El servidor escapa las comillas simples dentro de los onclick (ej. \'formBuscador\').
+function normalizarComillasSimples(onclick: string): string {
+  return onclick.replace(/\\'/g, "'");
+}
+
+// Parsea los parámetros de un onclick de mojarra.jsfcljs.
+function parsearParametrosMojarra(onclick: string): Record<string, string> {
   const parametros: Record<string, string> = {};
-  // El servidor escapa el código JS dentro del atributo onclick; tras decodificar
-  // las entidades, las comillas conservan una barra invertida (\"clave\":\"valor\").
-  // Se desescapan primero para poder localizar el objeto de parámetros.
+  const codigoJs = normalizarComillasSimples(onclick);
+  const coincidencia = codigoJs.match(/mojarra\.jsfcljs\(document\.getElementById\('([^']+)'\),\{([\s\S]*?)\},''\)/i);
+  if (!coincidencia) return parametros;
+
+  const entradas = Array.from(coincidencia[2].matchAll(/'([^']+)'\s*:\s*'([^']*)'/g));
+  for (const [, clave, valor] of entradas) {
+    parametros[clave] = valor;
+  }
+  return parametros;
+}
+
+// Parsea los parámetros de una llamada RichFaces.ajax (objeto "parameters").
+function parsearParametrosRichFaces(onclick: string): Record<string, string> {
+  const parametros: Record<string, string> = {};
   const codigoJs = onclick.replace(/\\"/g, '"');
   const coincidencia = codigoJs.match(/RichFaces\.ajax\([^\{]*\{\s*"parameters"\s*:\s*\{([\s\S]*?)\}\s*,\s*"incId"/i);
   if (!coincidencia) return parametros;
@@ -107,134 +120,171 @@ export function extraerEstadoVista(html: string): string {
   );
 }
 
-// Extrae los documentos de una página: el análisis completo (ruta_doc) de cada
-// tarjeta y las resoluciones individuales (uuid) de cada fila de su tabla.
-export function parsearDocumentos(html: string, grupoInicial = 0): RegistroDocumento[] {
-  const $ = cheerio.load(extraerCdata(html));
-  const documentos: RegistroDocumento[] = [];
-  const vistos = new Set<string>();
-  let numeroGrupo = grupoInicial;
+// Extrae los campos de un formulario JSF tal como los enviaría un navegador:
+// texto, ocultos, selects (opción seleccionada) y checkboxes marcados.
+// Los botones imagen y los checkboxes sin marcar NO se incluyen.
+export function parsearCamposFormulario(html: string, idFormulario: string): CamposFormulario {
+  const $ = cheerio.load(html);
+  const campos: CamposFormulario = {};
+  const formulario = $(`form#${idFormulario}`);
 
-  $('div.rf-p[id^="formBoletin:repeat:"]').each((_indicePanel, panelEl) => {
-    numeroGrupo += 1;
-    const panel = $(panelEl);
-    const bloqueTitulo = panel.find('span[style*="text-decoration: underline"]').first();
-    const especialidad = limpiar(
-      panel
-        .find('span[style*="color:#3b5998"]')
-        .filter((_, el) => {
-          const texto = $(el).text().trim();
-          return texto.length > 0 && !/^especialidad\s*:?$/i.test(texto);
-        })
-        .first()
-        .text()
-    );
-    const resumen = limpiar(panel.find('p').first().text());
-
-    // Documento completo: botón "Descargar" del panel (parámetro ruta_doc)
-    const botonDescargar = panel.find('input[type="submit"][onclick*="mojarra.jsfcljs"]').first();
-    const parametrosPanel = parsearParametrosDescarga(botonDescargar.attr('onclick') ?? '');
-    if (botonDescargar.length > 0 && parametrosPanel.ruta_doc) {
-      const claveUnica = `analisis:${parametrosPanel.ruta_doc}`;
-      if (!vistos.has(claveUnica)) {
-        vistos.add(claveUnica);
-        documentos.push({
-          index: documentos.length,
-          grupo: numeroGrupo,
-          kind: 'analisis',
-          title: limpiar(bloqueTitulo.text()) ?? `document-${documentos.length + 1}`,
-          summary: resumen,
-          especialidad,
-          rutaDoc: parametrosPanel.ruta_doc,
-          downloadButtonName: botonDescargar.attr('name'),
-          detailParams: {},
-        });
-      }
-    }
-
-    // Resoluciones individuales: ícono PDF de cada fila (parámetro uuid)
-    panel.find('table[id$="gridParticipante"] tbody tr').each((_indiceFila, tr) => {
-      const fila = $(tr);
-      const celdas = fila.find('td');
-      const inputDescarga = fila.find('input[type="image"][onclick*="mojarra.jsfcljs"]').first();
-      const submitDescarga = fila.find('input[type="submit"][onclick*="mojarra.jsfcljs"]').first();
-      const enlaceDetalle = fila.find('a[onclick*="RichFaces.ajax"]').first();
-      if (inputDescarga.length === 0 && submitDescarga.length === 0 && enlaceDetalle.length === 0) {
-        return;
-      }
-
-      const parametrosDescarga = parsearParametrosDescarga(inputDescarga.attr('onclick') ?? '');
-      const parametrosDetalle = parsearParametrosDetalle(enlaceDetalle.attr('onclick') ?? '');
-      const claveUnica =
-        parametrosDescarga.ruta_doc ||
-        parametrosDetalle.uuid ||
-        limpiar(celdas.eq(0).text()) ||
-        `document-${documentos.length + 1}`;
-      if (vistos.has(claveUnica)) return;
-      vistos.add(claveUnica);
-
-      documentos.push({
-        index: documentos.length,
-        grupo: numeroGrupo,
-        kind: 'resolucion',
-        title: limpiar(bloqueTitulo.text()) ?? limpiar(celdas.eq(0).text()) ?? `document-${documentos.length + 1}`,
-        number: limpiar(celdas.eq(0).clone().find('input').remove().end().text()),
-        room: limpiar(celdas.eq(1).text()),
-        date: limpiar(celdas.eq(2).text()),
-        summary: resumen,
-        especialidad,
-        uuid: parametrosDetalle.uuid || parametrosDescarga.uuid,
-        rutaDoc: parametrosDescarga.ruta_doc,
-        downloadButtonName: inputDescarga.attr('name') ?? submitDescarga.attr('name') ?? undefined,
-        detailParams: parametrosDetalle,
-      });
-    });
+  formulario.find('input').each((_, el) => {
+    const nombre = $(el).attr('name');
+    const tipo = $(el).attr('type') ?? '';
+    if (!nombre) return;
+    if (tipo === 'image') return;
+    if (tipo === 'checkbox' && $(el).attr('checked') === undefined) return;
+    campos[nombre] = $(el).attr('value') ?? '';
   });
 
-  if (documentos.length === 0) {
-    // Plan B: si el parseo por panel falla, se buscan filas directamente por regex.
-    const crudo = extraerCdata(html);
-    const coincidencias = Array.from(crudo.matchAll(/<tr[^>]*id="[^"]*gridParticipante:[^"]*"[\s\S]*?<\/tr>/gi));
-    for (const [indice, coincidencia] of coincidencias.entries()) {
-      numeroGrupo += 1;
-      const htmlFila = coincidencia[0];
-      const $fila = cheerio.load(htmlFila);
-      const celdas = $fila('td');
-      const inputDescarga = $fila('input[type="image"][onclick*="mojarra.jsfcljs"]').first();
-      const submitDescarga = $fila('input[type="submit"][onclick*="mojarra.jsfcljs"]').first();
-      const enlaceDetalle = $fila('a[onclick*="RichFaces.ajax"]').first();
-      if (inputDescarga.length === 0 && submitDescarga.length === 0 && enlaceDetalle.length === 0) {
-        continue;
-      }
-      const parametrosDescarga = parsearParametrosDescarga(inputDescarga.attr('onclick') ?? '');
-      const parametrosDetalle = parsearParametrosDetalle(enlaceDetalle.attr('onclick') ?? '');
-      const bloqueTitulo = $fila('span[style*="text-decoration: underline"]').first();
-      const claveUnica =
-        parametrosDescarga.ruta_doc ||
-        parametrosDetalle.uuid ||
-        limpiar(celdas.eq(0).text()) ||
-        `document-${indice + 1}`;
-      if (vistos.has(claveUnica)) continue;
-      vistos.add(claveUnica);
+  formulario.find('select').each((_, el) => {
+    const nombre = $(el).attr('name');
+    if (!nombre) return;
+    const seleccionada = $(el).find('option[selected]').first().attr('value');
+    campos[nombre] = seleccionada ?? $(el).find('option').first().attr('value') ?? '';
+  });
 
-      documentos.push({
-        index: indice,
-        grupo: numeroGrupo,
-        kind: 'resolucion',
-        title: limpiar(bloqueTitulo.text()) ?? limpiar(celdas.eq(0).text()) ?? `document-${indice + 1}`,
-        number: limpiar(celdas.eq(0).clone().find('input').remove().end().text()),
-        room: limpiar(celdas.eq(1).text()),
-        date: limpiar(celdas.eq(2).text()),
-        summary: limpiar($fila('p').first().text()),
-        uuid: parametrosDetalle.uuid || parametrosDescarga.uuid,
-        rutaDoc: parametrosDescarga.ruta_doc,
-        downloadButtonName: inputDescarga.attr('name') ?? submitDescarga.attr('name') ?? undefined,
-        detailParams: parametrosDetalle,
-      });
+  formulario.find('textarea').each((_, el) => {
+    const nombre = $(el).attr('name');
+    if (nombre) campos[nombre] = $(el).text().trim();
+  });
+
+  return campos;
+}
+
+export function parsearAccionFormulario(html: string, idFormulario: string): string {
+  const $ = cheerio.load(html);
+  return $(`form#${idFormulario}`).attr('action') ?? '';
+}
+
+// Busca el botón "Buscar" del formulario (mojarra.jsfcljs con forward=buscar).
+// Prefiere el que incluye el parámetro "busqueda" (búsqueda especializada).
+export function parsearBotonBusqueda(
+  html: string,
+  idFormulario: string
+): { nombre: string; params: Record<string, string> } {
+  const $ = cheerio.load(html);
+  let mejor: { nombre: string; params: Record<string, string> } | undefined;
+
+  $(`form#${idFormulario} input[type="image"][onclick*="mojarra.jsfcljs"]`).each((_, el) => {
+    const nombre = $(el).attr('name');
+    if (!nombre) return;
+    const params = parsearParametrosMojarra($(el).attr('onclick') ?? '');
+    if (params['forward'] !== 'buscar') return;
+    if (params['busqueda'] || !mejor) mejor = { nombre, params };
+  });
+
+  return mejor ?? { nombre: '', params: {} };
+}
+
+// Extrae los recuadros de resultado.xhtml. Cada recuadro es una resolución con
+// sus detalles, el enlace "Ver Resolución" (descarga directa) y el botón
+// "Ver Ficha" (RichFaces.ajax con los parámetros del caso).
+export function parsearResultados(html: string, grupoInicial = 0): RegistroResultado[] {
+  const $ = cheerio.load(extraerCdata(html));
+  const resultados: RegistroResultado[] = [];
+  let numeroGrupo = grupoInicial;
+
+  $('div.rf-p[id^="formBuscador:repeat:"]').each((_indicePanel, panelEl) => {
+    numeroGrupo += 1;
+    const panel = $(panelEl);
+    const cabeceras = panel.find('.rf-p-hdr span[style*="font-weight:bold"]');
+
+    const resultado: RegistroResultado = {
+      index: resultados.length,
+      grupo: numeroGrupo,
+      tipoRecurso: limpiar(cabeceras.eq(0).text()),
+      nroexp: limpiar(cabeceras.eq(1).text()),
+      fichaParams: {},
+    };
+
+    // Detalles del cuerpo: pares etiqueta/valor
+    const etiquetaACampo: Record<
+      string,
+      | 'tipoRecurso'
+      | 'especialidad'
+      | 'tipoResolucion'
+      | 'fechaResolucion'
+      | 'organoJurisdiccional'
+      | 'pretension'
+      | 'sumilla'
+      | 'palabrasClave'
+    > = {
+      'especialidad': 'especialidad',
+      'tipo resolucion': 'tipoResolucion',
+      'fecha resolucion': 'fechaResolucion',
+      'organo jurisdiccional': 'organoJurisdiccional',
+      'pretencion / delito': 'pretension',
+      'sumilla': 'sumilla',
+      'palabras clave': 'palabrasClave',
+    };
+    panel.find('.rf-p-b .txtbold').each((_, el) => {
+      const etiqueta = limpiar($(el).text())?.toLowerCase().replace(/:$/, '').trim();
+      if (!etiqueta) return;
+      const campo = etiquetaACampo[etiqueta];
+      if (!campo) return;
+      const valor = limpiar($(el).next().text());
+      if (valor) resultado[campo] = valor;
+    });
+
+    // Botón "Ver Ficha"
+    const enlaceFicha = panel.find('a[title="Ver"]').first();
+    if (enlaceFicha.length > 0) {
+      resultado.fichaSourceId = enlaceFicha.attr('id');
+      resultado.fichaParams = parsearParametrosRichFaces(enlaceFicha.attr('onclick') ?? '');
     }
-  }
 
-  return documentos;
+    // Enlace "Ver Resolución" (descarga directa)
+    const enlaceDescarga = panel.find('a[href*="ServletDescarga"]').first();
+    if (enlaceDescarga.length > 0) {
+      const href = enlaceDescarga.attr('href') ?? '';
+      resultado.rutaDescarga = href;
+      try {
+        resultado.uuid = new URL(href, 'https://jurisprudencia.pj.gob.pe').searchParams.get('uuid') ?? undefined;
+      } catch {
+        resultado.uuid = undefined;
+      }
+    }
+
+    resultados.push(resultado);
+  });
+
+  return resultados;
+}
+
+// Extrae el contenido del popup de la ficha: datos etiqueta/valor y los enlaces
+// de descarga (PDF y Word) dentro de "Archivo de la Resolución".
+export function parsearFicha(html: string): { datos: DatosFicha; descargas: DescargaFicha[] } {
+  const coincidencia = html.match(
+    /<update\s+id="([^"]*popupResolucion[^"]*)"[^>]*>[\s\S]*?<!\[CDATA\[([\s\S]*?)\]\]><\/update>/i
+  );
+  const contenido = coincidencia?.[2] ?? '';
+  const $ = cheerio.load(contenido);
+  const datos: DatosFicha = {};
+
+  $('.txtbold').each((_, el) => {
+    const etiqueta = limpiar($(el).text());
+    if (!etiqueta) return;
+    const contenedorValor = $(el).next();
+    const valor = limpiar(contenedorValor.find('.data').first().text() || contenedorValor.text());
+    if (valor) datos[etiqueta] = valor;
+  });
+
+  const descargas: DescargaFicha[] = [];
+  $('a[href*="ServletDescarga"]').each((_, el) => {
+    const href = $(el).attr('href') ?? '';
+    try {
+      const uuid = new URL(href, 'https://jurisprudencia.pj.gob.pe').searchParams.get('uuid');
+      if (!uuid) return;
+      const imagen =
+        $(el).find('img').attr('src') ?? $(el).find('input[type="image"]').attr('src') ?? '';
+      descargas.push({ uuid, formato: imagen.toLowerCase().includes('word') ? 'doc' : 'pdf' });
+    } catch {
+      // URL inválida: se ignora
+    }
+  });
+
+  return { datos, descargas };
 }
 
 // Indica si la página tiene un botón "siguiente" en el DataScroller de RichFaces.

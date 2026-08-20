@@ -1,9 +1,10 @@
 # Scraper Challenge
 
-Scraper en TypeScript (sin automatización de navegador) para extraer los datos de los
-documentos del portal de jurisprudencia, navegar por todas las páginas y descargar los
-PDFs asociados: el documento completo de cada análisis y las resoluciones individuales.
-Usa únicamente `axios` (requests HTTP) y `cheerio` (parsing).
+Scraper en TypeScript (sin automatización de navegador) para el portal de jurisprudencia.
+Flujo real: `inicio.xhtml` → búsqueda → `resultado.xhtml` (recuadros con los detalles de
+cada resolución) → apertura de la ficha de cada caso para descargar la resolución en
+**PDF** y en **Word**, navegando por todas las páginas. Usa únicamente `axios` (requests
+HTTP) y `cheerio` (parsing).
 
 ## Requisitos
 
@@ -27,7 +28,8 @@ npm run dev
 Los nombres de las variables de entorno se mantienen en inglés para no romper los
 comandos existentes; en el código, las constantes correspondientes están en español.
 
-- `START_URL`: URL inicial del listado. Por defecto usa el portal del desafío.
+- `START_URL`: URL inicial (página de búsqueda). Por defecto
+  `https://jurisprudencia.pj.gob.pe/jurisprudenciaweb/faces/page/inicio.xhtml`.
 - `OUTPUT_DIR`: carpeta de salida. Por defecto `scraped`.
 - `MAX_PAGES`: límite opcional de páginas a recorrer.
 - `MAX_DOWNLOAD_ATTEMPTS`: límite total de documentos a intentar descargar. Por defecto
@@ -63,14 +65,13 @@ npm run dev
 
 ## Salida
 
-- `scraped/pdfs/`: PDFs descargados, organizados en una carpeta numerada por tarjeta
-  del listado. Dentro de cada carpeta (`1/`, `2/`, `3/`, …) quedan el análisis completo
-  (`*_documento-completo.pdf`) y las resoluciones individuales (`Resolucion_*.pdf`)
-  de esa tarjeta.
+- `scraped/pdfs/`: archivos descargados, organizados en una carpeta numerada por recuadro
+  del listado (`1/`, `2/`, `3/`, …). Dentro de cada carpeta quedan la resolución en PDF
+  (`Resolucion_*.pdf`) y en Word (`Resolucion_*.doc`) de ese caso.
 - `scraped/documents.json`: datos estructurados únicamente de los documentos
-  descargados (título, número de recurso, sala, fecha, resumen, especialidad, uuid,
-  parámetros de detalle y nombre del PDF). Si una descarga falla, el documento aparece
-  en `failed.json`, no aquí.
+  procesados (tipo de recurso, expediente, especialidad, tipo y fecha de resolución,
+  órgano jurisdiccional, pretensión, sumilla, palabras clave, datos completos de la
+  ficha y los archivos descargados). Si una descarga falla, se registra en `failed.json`.
 - `scraped/failed.json`: documentos cuya descarga falló, con el motivo, para poder
   reintentarlos después con `RETRY_FAILED=1`.
 
@@ -85,12 +86,14 @@ servidor lo envía. Si el error persiste tras varios intentos, registra el docum
 
 El scraper está ajustado al flujo real del portal:
 
-- `GET` inicial
-- `POST` AJAX inicial para cargar resultados (Mojarra/RichFaces)
-- parseo del listado con `cheerio`
-- descarga por `POST` del PDF (con `javax.faces.ViewState` obligatorio)
+- `GET` a `inicio.xhtml` y POST de búsqueda (los parámetros del botón "Buscar" se
+  extraen del propio formulario; el POST usa la URL con `jsessionid`)
+- `GET` a `resultado.xhtml` siguiendo la redirección (HTTP → HTTPS)
+- parseo de los recuadros con `cheerio` (tipo de recurso, expediente, detalles)
+- descarga directa de la resolución en PDF (`ServletDescarga?uuid=…`)
+- apertura de la ficha (`RichFaces.ajax`) para extraer los detalles completos y
+  descargar la resolución en Word
 - paginación por `next` con el DataScroller de RichFaces
 
-El ViewState se extrae de la respuesta AJAX (`<update id="javax.faces.ViewState">`)
-para que el POST de descarga no devuelva la página HTML en lugar del PDF. Las respuestas
-de descarga se validan contra la cabecera mágica `%PDF-` antes de guardarse.
+Los archivos descargados se validan (no se guardan páginas HTML como si fueran
+archivos) y las respuestas se decodifican respetando el charset real del portal.

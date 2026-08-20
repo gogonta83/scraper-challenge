@@ -57,6 +57,9 @@ export async function solicitudConReintentos(
         // Se piden siempre los bytes crudos: axios decodificaría con el charset
         // declarado y convertiría títulos Latin-1 como "Análisis" en "An�lisis".
         responseType: 'arraybuffer',
+        // No se siguen redirecciones automáticamente: el portal redirige a
+        // http:// y hay que convertirla a https manualmente.
+        maxRedirects: 0,
         validateStatus: () => true,
       });
 
