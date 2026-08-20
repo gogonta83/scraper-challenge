@@ -7,6 +7,7 @@ export type DocumentRecord = {
   room?: string;
   date?: string;
   summary?: string;
+  especialidad?: string;
   uuid?: string;
   rutaDoc?: string;
   downloadButtonName?: string;
@@ -29,21 +30,10 @@ function decodeEntities(value: string): string {
 
 function unwrapPartialResponse(html: string): string {
   const cdataBlocks = Array.from(html.matchAll(/<!\[CDATA\[([\s\S]*?)\]\]>/gi));
-  const raw = cdataBlocks.length === 0 ? html : cdataBlocks.map((match) => match[1]).join('\n');
-  return decodeEntities(raw);
-}
-
-function extractUuid(onclick: string): string | undefined {
-  const match = onclick.match(/"uuid"\s*:\s*"((?:\\.|[^"\\])*)"/i);
-  const rawValue = match?.[1];
-  if (!rawValue) return undefined;
-
-  return rawValue
-    .replace(/\\u002D/g, '-')
-    .replace(/\\\//g, '/')
-    .replace(/\\n/g, '\n')
-    .replace(/\\"/g, '"')
-    .replace(/\\\\/g, '\\');
+  // Do NOT decode HTML entities here: &quot; inside an attribute like
+  // onclick="...&quot;RichFaces.ajax(...)&quot;..." must stay escaped until
+  // cheerio parses the fragment, otherwise the attribute value is truncated.
+  return cdataBlocks.length === 0 ? html : cdataBlocks.map((match) => match[1]).join('\n');
 }
 
 function parseDownloadParams(onclick: string): Record<string, string> {
@@ -58,19 +48,30 @@ function parseDownloadParams(onclick: string): Record<string, string> {
   return params;
 }
 
+function unescapeJsString(value: string): string {
+  return value
+    .replace(/\\\\u([0-9a-fA-F]{4})/g, (_, hex: string) => String.fromCharCode(parseInt(hex, 16)))
+    .replace(/\\u([0-9a-fA-F]{4})/g, (_, hex: string) => String.fromCharCode(parseInt(hex, 16)))
+    .replace(/\\\\\//g, '/')
+    .replace(/\\\//g, '/')
+    .replace(/\\\\n/g, '\n')
+    .replace(/\\n/g, '\n')
+    .replace(/\\"/g, '"')
+    .replace(/\\\\/g, '\\');
+}
+
 function parseDetailParams(onclick: string): Record<string, string> {
   const params: Record<string, string> = {};
-  const match = onclick.match(/RichFaces\.ajax\([^\{]*\{\s*"parameters"\s*:\s*\{([\s\S]*?)\}\s*,\s*"incId"/i);
+  // The server HTML-escapes the JS source inside the onclick attribute, so after
+  // entity decoding the quotes still carry a backslash (\"key\":\"value\"). Unescape
+  // those first so the JSON-ish parameters object can be matched normally.
+  const jsSource = onclick.replace(/\\"/g, '"');
+  const match = jsSource.match(/RichFaces\.ajax\([^\{]*\{\s*"parameters"\s*:\s*\{([\s\S]*?)\}\s*,\s*"incId"/i);
   if (!match) return params;
 
   const entries = Array.from(match[1].matchAll(/"([^"]+)"\s*:\s*"((?:\\.|[^"\\])*)"/g));
   for (const [, key, value] of entries) {
-    params[key] = value
-      .replace(/\\u002D/g, '-')
-      .replace(/\\\//g, '/')
-      .replace(/\\n/g, '\n')
-      .replace(/\\"/g, '"')
-      .replace(/\\\\/g, '\\');
+    params[key] = unescapeJsString(value);
   }
   return params;
 }
@@ -119,7 +120,18 @@ export function parseDocumentsFromHtml(html: string): DocumentRecord[] {
 
     const downloadParams = parseDownloadParams(downloadInput.attr('onclick') ?? '');
     const detailParams = parseDetailParams(detailLink.attr('onclick') ?? '');
-    const titleBlock = row.closest('.rf-p').find('span[style*="text-decoration: underline"]').first();
+    const panel = row.closest('.rf-p');
+    const titleBlock = panel.find('span[style*="text-decoration: underline"]').first();
+    const especialidad = clean(
+      panel
+        .find('span[style*="color:#3b5998"]')
+        .filter((_, el) => {
+          const text = $(el).text().trim();
+          return text.length > 0 && !/^especialidad\s*:?$/i.test(text);
+        })
+        .first()
+        .text()
+    );
     const uniqueKey = downloadParams.ruta_doc || detailParams.uuid || clean(cells.eq(0).text()) || `document-${index + 1}`;
     if (seen.has(uniqueKey)) return;
     seen.add(uniqueKey);
@@ -127,10 +139,11 @@ export function parseDocumentsFromHtml(html: string): DocumentRecord[] {
     docs.push({
       index,
       title: clean(titleBlock.text()) ?? clean(cells.eq(0).text()) ?? `document-${index + 1}`,
-      number: clean(cells.eq(0).clone().children().remove().end().text()),
+      number: clean(cells.eq(0).clone().find('input').remove().end().text()),
       room: clean(cells.eq(1).text()),
       date: clean(cells.eq(2).text()),
-      summary: clean(row.closest('.rf-p').find('p').first().text()),
+      summary: clean(panel.find('p').first().text()),
+      especialidad,
       uuid: detailParams.uuid || downloadParams.uuid,
       rutaDoc: downloadParams.ruta_doc,
       downloadButtonName: downloadInput.attr('name') ?? downloadSubmit.attr('name') ?? undefined,
@@ -161,7 +174,7 @@ export function parseDocumentsFromHtml(html: string): DocumentRecord[] {
       docs.push({
         index,
         title: clean(titleBlock.text()) ?? clean(cells.eq(0).text()) ?? `document-${index + 1}`,
-        number: clean(cells.eq(0).clone().children().remove().end().text()),
+        number: clean(cells.eq(0).clone().find('input').remove().end().text()),
         room: clean(cells.eq(1).text()),
         date: clean(cells.eq(2).text()),
         summary: clean($row('p').first().text()),

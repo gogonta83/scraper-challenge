@@ -36,7 +36,7 @@ export async function requestWithRetry(
     cookieJar?: { value: string };
     retry: RetryOptions;
   }
-): Promise<{ status: number; headers: Record<string, string | string[]>; data: string | Buffer }> {
+): Promise<{ status: number; headers: Record<string, string | string[]>; data: Buffer }> {
   let lastError: unknown;
 
   for (let attempt = 0; attempt <= options.retry.retries; attempt += 1) {
@@ -50,7 +50,9 @@ export async function requestWithRetry(
           ...(cookieValue ? { cookie: cookieValue } : {}),
         },
         data: options.data,
-        responseType: options.responseType ?? 'text',
+        // Always request raw bytes: axios would otherwise decode text using the
+        // declared charset and mangle Latin-1 titles like "Análisis" into "An�lisis".
+        responseType: 'arraybuffer',
         validateStatus: () => true,
       });
 
@@ -84,6 +86,15 @@ export async function requestWithRetry(
   }
 
   throw lastError instanceof Error ? lastError : new Error('Request failed');
+}
+
+export function decodeText(data: Buffer): string {
+  try {
+    return new TextDecoder('utf-8', { fatal: true }).decode(data);
+  } catch {
+    // The portal declares charset=ISO-8859-1 but sends single-byte Latin-1 text.
+    return new TextDecoder('windows-1252').decode(data);
+  }
 }
 
 function mergeSetCookies(
